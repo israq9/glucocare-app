@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Activity,
   Pill,
@@ -24,7 +24,9 @@ import {
   Sparkles,
   HeartPulse,
   MapPin,
-  LogOut
+  LogOut,
+  Cloud,
+  RefreshCw
 } from 'lucide-react';
 import { supabase } from './supabaseClient';
 import type { Session } from '@supabase/supabase-js';
@@ -34,7 +36,7 @@ const getRelativeDate = (daysOffset = 0, hours = 8, minutes = 0) => {
   const d = new Date();
   d.setDate(d.getDate() + daysOffset);
   d.setHours(hours, minutes, 0, 0);
-  return d.toISOString().slice(0, 16); // YYYY-MM-DDTHH:mm
+  return d.toISOString().slice(0, 16);
 };
 
 const TODAY_STR = new Date().toISOString().slice(0, 10);
@@ -110,30 +112,6 @@ const INITIAL_SUGAR_LOGS = [
     type: 'Fasting',
     recordedAt: getRelativeDate(-3, 7, 45),
     notes: 'Normal morning reading'
-  },
-  {
-    id: 'bs-6',
-    value: 9.8,
-    unit: 'mmol/L',
-    type: '2-Hours Post-Meal',
-    recordedAt: getRelativeDate(-5, 15, 20),
-    notes: 'Slightly high after restaurant lunch'
-  },
-  {
-    id: 'bs-7',
-    value: 5.4,
-    unit: 'mmol/L',
-    type: 'Fasting',
-    recordedAt: getRelativeDate(-6, 7, 20),
-    notes: 'Great fasting level'
-  },
-  {
-    id: 'bs-8',
-    value: 6.4,
-    unit: 'mmol/L',
-    type: 'Bedtime',
-    recordedAt: getRelativeDate(-9, 22, 30),
-    notes: 'Steady before sleep'
   }
 ];
 
@@ -161,14 +139,6 @@ const INITIAL_ACTION_ITEMS = [
     details: 'Strict 10-12 hours overnight fasting required. Water is allowed.',
     targetDate: getRelativeDate(4).slice(0, 10),
     completed: false
-  },
-  {
-    id: 'act-4',
-    category: 'lab_test',
-    title: 'Serum Creatinine & Urine Microalbumin',
-    details: 'Routine kidney function screening prior to endo visit',
-    targetDate: getRelativeDate(4).slice(0, 10),
-    completed: false
   }
 ];
 
@@ -180,14 +150,6 @@ const INITIAL_APPOINTMENTS = [
     location: 'United Hospital, Gulshan, Dhaka (Room 402)',
     dateTime: getRelativeDate(6, 17, 30),
     notes: 'Bring 30-day blood sugar log CSV & latest HbA1c report. Ask about afternoon Sitagliptin timing.'
-  },
-  {
-    id: 'apt-2',
-    doctorName: 'Dr. Tanvir Ahmed',
-    specialty: 'Ophthalmologist (Retina Check)',
-    location: 'Bangladesh Eye Hospital, Dhanmondi',
-    dateTime: getRelativeDate(18, 11, 0),
-    notes: 'Annual diabetic dilated eye exam — arrange ride home.'
   }
 ];
 
@@ -347,7 +309,6 @@ const GlucoseTrendChart = ({
           </linearGradient>
         </defs>
 
-        {/* Target Zone Band */}
         <rect
           x={padLeft}
           y={Math.max(padTop, yHighTarget)}
@@ -357,7 +318,6 @@ const GlucoseTrendChart = ({
           fillOpacity="0.08"
         />
 
-        {/* Upper Target Line */}
         <line
           x1={padLeft}
           y1={yHighTarget}
@@ -371,7 +331,6 @@ const GlucoseTrendChart = ({
           Target Max ({maxTarget} {displayUnit})
         </text>
 
-        {/* Lower Target Line */}
         <line
           x1={padLeft}
           y1={yLowTarget}
@@ -382,7 +341,6 @@ const GlucoseTrendChart = ({
           strokeDasharray="4 4"
         />
 
-        {/* Y-Axis Labels */}
         {[yMin, (yMin + yMax) / 2, yMax].map((tick, idx) => {
           const yPos = getY(tick);
           return (
@@ -395,13 +353,11 @@ const GlucoseTrendChart = ({
           );
         })}
 
-        {/* Area & Line */}
         {points.length > 1 && <path d={areaD} fill="url(#glucoseArea)" />}
         {points.length > 1 && (
           <path d={pathD} fill="none" stroke="#0d9488" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
         )}
 
-        {/* Data Points */}
         {points.map((p, idx) => {
           const status = getGlucoseStatus(p.log.value, p.log.unit, p.log.type);
           const pointColor =
@@ -442,98 +398,147 @@ const GlucoseTrendChart = ({
 
 // --- MAIN APPLICATION ---
 export default function App({ session }: { session?: Session }) {
-  const userId = session?.user?.id || 'guest';
+  const userId = session?.user?.id;
   const userEmail = session?.user?.email;
 
-  // Navigation Tab
+  // Navigation & Sync Status
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [syncStatus, setSyncStatus] = useState<'loading' | 'synced' | 'syncing' | 'error'>('loading');
+  const isInitialLoad = useRef(true);
+  const skipNextUpload = useRef(false);
 
-  // Persistent States (Scoped per authenticated user ID)
-  const [medications, setMedications] = useState(() => {
-    try {
-      const saved = localStorage.getItem(`gc_${userId}_medications`);
-      return saved ? JSON.parse(saved) : INITIAL_MEDICATIONS;
-    } catch {
-      return INITIAL_MEDICATIONS;
-    }
+  // App State
+  const [medications, setMedications] = useState<any[]>(INITIAL_MEDICATIONS);
+  const [takenMedsByDate, setTakenMedsByDate] = useState<Record<string, string[]>>({
+    [TODAY_STR]: ['med-1']
   });
+  const [sugarLogs, setSugarLogs] = useState<any[]>(INITIAL_SUGAR_LOGS);
+  const [actionItems, setActionItems] = useState<any[]>(INITIAL_ACTION_ITEMS);
+  const [appointments, setAppointments] = useState<any[]>(INITIAL_APPOINTMENTS);
+  const [settings, setSettings] = useState<any>(() => getInitialSettings(userEmail));
 
-  const [takenMedIdsToday, setTakenMedIdsToday] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem(`gc_${userId}_taken_${TODAY_STR}`);
-      return saved ? JSON.parse(saved) : ['med-1'];
-    } catch {
-      return ['med-1'];
+  const takenMedIdsToday = takenMedsByDate[TODAY_STR] || [];
+
+  // 1. Load data from Supabase on mount / login
+  useEffect(() => {
+    if (!userId) return;
+
+    let isMounted = true;
+    const loadCloudData = async () => {
+      setSyncStatus('loading');
+      const { data, error } = await supabase
+        .from('user_health_data')
+        .select('*')
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (!isMounted) return;
+
+      if (error) {
+        console.error('Error loading Supabase data:', error.message);
+        setSyncStatus('error');
+        isInitialLoad.current = false;
+        return;
+      }
+
+      if (data) {
+        skipNextUpload.current = true;
+        setMedications(data.medications || INITIAL_MEDICATIONS);
+        setTakenMedsByDate(data.taken_meds_by_date || {});
+        setSugarLogs(data.sugar_logs || INITIAL_SUGAR_LOGS);
+        setActionItems(data.action_items || INITIAL_ACTION_ITEMS);
+        setAppointments(data.appointments || INITIAL_APPOINTMENTS);
+        setSettings({
+          ...getInitialSettings(userEmail),
+          ...(data.settings || {}),
+          email: data.settings?.email || userEmail || 'patient.care@example.com'
+        });
+        setSyncStatus('synced');
+      } else {
+        // First time user: seed initial record into Supabase
+        const defaultSettings = getInitialSettings(userEmail);
+        setSettings(defaultSettings);
+        const { error: insertError } = await supabase.from('user_health_data').upsert({
+          user_id: userId,
+          medications: INITIAL_MEDICATIONS,
+          taken_meds_by_date: { [TODAY_STR]: ['med-1'] },
+          sugar_logs: INITIAL_SUGAR_LOGS,
+          action_items: INITIAL_ACTION_ITEMS,
+          appointments: INITIAL_APPOINTMENTS,
+          settings: defaultSettings,
+          updated_at: new Date().toISOString()
+        });
+        setSyncStatus(insertError ? 'error' : 'synced');
+      }
+      isInitialLoad.current = false;
+    };
+
+    loadCloudData();
+
+    // Real-time listener for changes made on other devices
+    const channel = supabase
+      .channel(`health_sync_${userId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'user_health_data',
+          filter: `user_id=eq.${userId}`
+        },
+        (payload) => {
+          const newData = payload.new as any;
+          if (!newData) return;
+          skipNextUpload.current = true;
+          setMedications(newData.medications || []);
+          setTakenMedsByDate(newData.taken_meds_by_date || {});
+          setSugarLogs(newData.sugar_logs || []);
+          setActionItems(newData.action_items || []);
+          setAppointments(newData.appointments || []);
+          if (newData.settings) setSettings(newData.settings);
+          setSyncStatus('synced');
+        }
+      )
+      .subscribe();
+
+    return () => {
+      isMounted = false;
+      supabase.removeChannel(channel);
+    };
+  }, [userId, userEmail]);
+
+  // 2. Auto-save changes to Supabase whenever state updates
+  useEffect(() => {
+    if (!userId || isInitialLoad.current) return;
+
+    if (skipNextUpload.current) {
+      skipNextUpload.current = false;
+      return;
     }
-  });
 
-  const [sugarLogs, setSugarLogs] = useState(() => {
-    try {
-      const saved = localStorage.getItem(`gc_${userId}_sugar_logs`);
-      return saved ? JSON.parse(saved) : INITIAL_SUGAR_LOGS;
-    } catch {
-      return INITIAL_SUGAR_LOGS;
-    }
-  });
+    setSyncStatus('syncing');
+    const timeoutId = setTimeout(async () => {
+      const { error } = await supabase.from('user_health_data').upsert({
+        user_id: userId,
+        medications,
+        taken_meds_by_date: takenMedsByDate,
+        sugar_logs: sugarLogs,
+        action_items: actionItems,
+        appointments,
+        settings,
+        updated_at: new Date().toISOString()
+      });
 
-  const [actionItems, setActionItems] = useState(() => {
-    try {
-      const saved = localStorage.getItem(`gc_${userId}_action_items`);
-      return saved ? JSON.parse(saved) : INITIAL_ACTION_ITEMS;
-    } catch {
-      return INITIAL_ACTION_ITEMS;
-    }
-  });
+      if (error) {
+        console.error('Sync failed:', error.message);
+        setSyncStatus('error');
+      } else {
+        setSyncStatus('synced');
+      }
+    }, 400);
 
-  const [appointments, setAppointments] = useState(() => {
-    try {
-      const saved = localStorage.getItem(`gc_${userId}_appointments`);
-      return saved ? JSON.parse(saved) : INITIAL_APPOINTMENTS;
-    } catch {
-      return INITIAL_APPOINTMENTS;
-    }
-  });
-
-  const [settings, setSettings] = useState(() => {
-    try {
-      const saved = localStorage.getItem(`gc_${userId}_settings`);
-      return saved ? JSON.parse(saved) : getInitialSettings(userEmail);
-    } catch {
-      return getInitialSettings(userEmail);
-    }
-  });
-
-  // Sync authenticated email if settings still has placeholder
-  useEffect(() => {
-    if (userEmail && settings.email === 'patient.care@example.com') {
-      setSettings((prev: any) => ({ ...prev, email: userEmail }));
-    }
-  }, [userEmail, settings.email]);
-
-  // Sync to LocalStorage
-  useEffect(() => {
-    localStorage.setItem(`gc_${userId}_medications`, JSON.stringify(medications));
-  }, [medications, userId]);
-
-  useEffect(() => {
-    localStorage.setItem(`gc_${userId}_taken_${TODAY_STR}`, JSON.stringify(takenMedIdsToday));
-  }, [takenMedIdsToday, userId]);
-
-  useEffect(() => {
-    localStorage.setItem(`gc_${userId}_sugar_logs`, JSON.stringify(sugarLogs));
-  }, [sugarLogs, userId]);
-
-  useEffect(() => {
-    localStorage.setItem(`gc_${userId}_action_items`, JSON.stringify(actionItems));
-  }, [actionItems, userId]);
-
-  useEffect(() => {
-    localStorage.setItem(`gc_${userId}_appointments`, JSON.stringify(appointments));
-  }, [appointments, userId]);
-
-  useEffect(() => {
-    localStorage.setItem(`gc_${userId}_settings`, JSON.stringify(settings));
-  }, [settings, userId]);
+    return () => clearTimeout(timeoutId);
+  }, [userId, medications, takenMedsByDate, sugarLogs, actionItems, appointments, settings]);
 
   // Toast Notification Banner
   const [toast, setToast] = useState<{ message: string; type: string } | null>(null);
@@ -566,14 +571,14 @@ export default function App({ session }: { session?: Session }) {
       recordedAt: sugarForm.recordedAt || new Date().toISOString().slice(0, 16),
       notes: sugarForm.notes.trim()
     };
-    setSugarLogs((prev: any[]) => [newEntry, ...prev]);
+    setSugarLogs((prev) => [newEntry, ...prev]);
     setSugarForm((prev) => ({
       ...prev,
       value: '',
       notes: '',
       recordedAt: new Date().toISOString().slice(0, 16)
     }));
-    showToast('Blood sugar reading logged successfully!');
+    showToast('Blood sugar reading logged & synced!');
   };
 
   const startEditingSugar = (log: any) => {
@@ -583,7 +588,7 @@ export default function App({ session }: { session?: Session }) {
 
   const saveEditedSugar = () => {
     if (!editSugarForm || !editSugarForm.value || isNaN(Number(editSugarForm.value))) return;
-    setSugarLogs((prev: any[]) =>
+    setSugarLogs((prev) =>
       prev.map((item) =>
         item.id === editingSugarId
           ? { ...editSugarForm, value: Number(editSugarForm.value) }
@@ -596,7 +601,7 @@ export default function App({ session }: { session?: Session }) {
   };
 
   const deleteSugarLog = (id: string) => {
-    setSugarLogs((prev: any[]) => prev.filter((item) => item.id !== id));
+    setSugarLogs((prev) => prev.filter((item) => item.id !== id));
     showToast('Reading deleted.', 'info');
   };
 
@@ -650,23 +655,27 @@ export default function App({ session }: { session?: Session }) {
   const [editingMedId, setEditingMedId] = useState<string | null>(null);
 
   const toggleMedTakenToday = (medId: string) => {
-    setTakenMedIdsToday((prev) =>
-      prev.includes(medId) ? prev.filter((id) => id !== medId) : [...prev, medId]
-    );
+    setTakenMedsByDate((prev) => {
+      const current = prev[TODAY_STR] || [];
+      const updated = current.includes(medId)
+        ? current.filter((id) => id !== medId)
+        : [...current, medId];
+      return { ...prev, [TODAY_STR]: updated };
+    });
   };
 
   const handleSaveMedication = (e: React.FormEvent) => {
     e.preventDefault();
     if (!medForm.name.trim()) return;
     if (editingMedId) {
-      setMedications((prev: any[]) =>
+      setMedications((prev) =>
         prev.map((m) => (m.id === editingMedId ? { ...medForm, id: editingMedId } : m))
       );
       setEditingMedId(null);
       showToast('Medication schedule updated!');
     } else {
-      setMedications((prev: any[]) => [...prev, { ...medForm, id: 'med-' + Date.now() }]);
-      showToast('Daily medication added!');
+      setMedications((prev) => [...prev, { ...medForm, id: 'med-' + Date.now() }]);
+      showToast('Daily medication added & synced!');
     }
     setMedForm({ name: '', dosage: '', timing: 'Morning', instructions: '' });
   };
@@ -682,8 +691,11 @@ export default function App({ session }: { session?: Session }) {
   };
 
   const deleteMedication = (id: string) => {
-    setMedications((prev: any[]) => prev.filter((m) => m.id !== id));
-    setTakenMedIdsToday((prev) => prev.filter((mId) => mId !== id));
+    setMedications((prev) => prev.filter((m) => m.id !== id));
+    setTakenMedsByDate((prev) => ({
+      ...prev,
+      [TODAY_STR]: (prev[TODAY_STR] || []).filter((mId) => mId !== id)
+    }));
     showToast('Medication removed.', 'info');
   };
 
@@ -694,7 +706,7 @@ export default function App({ session }: { session?: Session }) {
   const addActionItem = (category: string, form: any, resetFn: Function) => (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.title.trim()) return;
-    setActionItems((prev: any[]) => [
+    setActionItems((prev) => [
       {
         id: 'act-' + Date.now(),
         category,
@@ -710,13 +722,13 @@ export default function App({ session }: { session?: Session }) {
   };
 
   const toggleActionItem = (id: string) => {
-    setActionItems((prev: any[]) =>
+    setActionItems((prev) =>
       prev.map((item) => (item.id === id ? { ...item, completed: !item.completed } : item))
     );
   };
 
   const deleteActionItem = (id: string) => {
-    setActionItems((prev: any[]) => prev.filter((item) => item.id !== id));
+    setActionItems((prev) => prev.filter((item) => item.id !== id));
     showToast('Item deleted.', 'info');
   };
 
@@ -734,13 +746,13 @@ export default function App({ session }: { session?: Session }) {
     e.preventDefault();
     if (!aptForm.doctorName.trim() || !aptForm.dateTime) return;
     if (editingAptId) {
-      setAppointments((prev: any[]) =>
+      setAppointments((prev) =>
         prev.map((a) => (a.id === editingAptId ? { ...aptForm, id: editingAptId } : a))
       );
       setEditingAptId(null);
       showToast('Appointment updated!');
     } else {
-      setAppointments((prev: any[]) => [...prev, { ...aptForm, id: 'apt-' + Date.now() }]);
+      setAppointments((prev) => [...prev, { ...aptForm, id: 'apt-' + Date.now() }]);
       showToast('Doctor appointment scheduled!');
     }
     setAptForm({ doctorName: '', specialty: '', location: '', dateTime: '', notes: '' });
@@ -758,7 +770,7 @@ export default function App({ session }: { session?: Session }) {
   };
 
   const deleteAppointment = (id: string) => {
-    setAppointments((prev: any[]) => prev.filter((a) => a.id !== id));
+    setAppointments((prev) => prev.filter((a) => a.id !== id));
     showToast('Appointment cancelled.', 'info');
   };
 
@@ -767,12 +779,12 @@ export default function App({ session }: { session?: Session }) {
 
   const resetDemoData = () => {
     setMedications(INITIAL_MEDICATIONS);
-    setTakenMedIdsToday(['med-1']);
+    setTakenMedsByDate({ [TODAY_STR]: ['med-1'] });
     setSugarLogs(INITIAL_SUGAR_LOGS);
     setActionItems(INITIAL_ACTION_ITEMS);
     setAppointments(INITIAL_APPOINTMENTS);
     setSettings(getInitialSettings(userEmail));
-    showToast('Demo data restored to default!');
+    showToast('Sample data restored & synced!');
   };
 
   const handleSignOut = async () => {
@@ -794,8 +806,8 @@ export default function App({ session }: { session?: Session }) {
   );
 
   const latestReading = sortedSugarLogs[0];
-  const pendingBuyItems = actionItems.filter((i: any) => i.category === 'med_to_buy' && !i.completed);
-  const pendingLabTests = actionItems.filter((i: any) => i.category === 'lab_test' && !i.completed);
+  const pendingBuyItems = actionItems.filter((i) => i.category === 'med_to_buy' && !i.completed);
+  const pendingLabTests = actionItems.filter((i) => i.category === 'lab_test' && !i.completed);
   const upcomingAppointments = useMemo(
     () =>
       [...appointments]
@@ -814,6 +826,35 @@ export default function App({ session }: { session?: Session }) {
     { id: 'tasks', label: 'Tests & Visits', icon: ClipboardList },
     { id: 'settings', label: 'Email Alerts', icon: Mail }
   ];
+
+  const renderSyncBadge = () => {
+    if (syncStatus === 'loading') {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-500 bg-slate-100 px-2.5 py-1 rounded-full">
+          <RefreshCw className="w-3 h-3 animate-spin" /> Loading Cloud...
+        </span>
+      );
+    }
+    if (syncStatus === 'syncing') {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-full">
+          <RefreshCw className="w-3 h-3 animate-spin" /> Syncing...
+        </span>
+      );
+    }
+    if (syncStatus === 'error') {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-rose-700 bg-rose-50 border border-rose-200 px-2.5 py-1 rounded-full">
+          Sync Error
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full">
+        <Cloud className="w-3 h-3" /> Cloud Synced
+      </span>
+    );
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col md:flex-row font-sans">
@@ -868,7 +909,7 @@ export default function App({ session }: { session?: Session }) {
         <div className="p-4 border-t border-slate-100 space-y-2.5">
           <div className="bg-slate-50 rounded-xl p-3 border border-slate-200/70">
             <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
-              <span>Daily Digest Status</span>
+              <span>Daily Digest</span>
               <span
                 className={`font-semibold ${
                   settings.enableDailyEmail ? 'text-emerald-600' : 'text-slate-400'
@@ -905,19 +946,19 @@ export default function App({ session }: { session?: Session }) {
 
       {/* Mobile Header */}
       <header className="md:hidden bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between sticky top-0 z-30">
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-lg bg-teal-600 flex items-center justify-center text-white">
             <HeartPulse className="w-5 h-5" />
           </div>
           <span className="font-bold text-slate-900 text-base">GlucoCare</span>
         </div>
         <div className="flex items-center gap-2">
+          {renderSyncBadge()}
           <button
             onClick={() => setShowEmailModal(true)}
-            className="flex items-center gap-1.5 bg-teal-50 text-teal-700 border border-teal-200 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
+            className="p-1.5 bg-teal-50 text-teal-700 border border-teal-200 rounded-lg"
           >
-            <Mail className="w-3.5 h-3.5" />
-            Digest
+            <Mail className="w-4 h-4" />
           </button>
           {session && (
             <button
@@ -937,14 +978,17 @@ export default function App({ session }: { session?: Session }) {
           {/* Top Page Header */}
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wider text-teal-600">
-                {new Date().toLocaleDateString('en-US', {
-                  weekday: 'long',
-                  month: 'long',
-                  day: 'numeric',
-                  year: 'numeric'
-                })}
-              </p>
+              <div className="flex items-center gap-2.5">
+                <p className="text-xs font-semibold uppercase tracking-wider text-teal-600">
+                  {new Date().toLocaleDateString('en-US', {
+                    weekday: 'long',
+                    month: 'long',
+                    day: 'numeric',
+                    year: 'numeric'
+                  })}
+                </p>
+                <span className="hidden md:inline-flex">{renderSyncBadge()}</span>
+              </div>
               <h2 className="text-2xl font-bold text-slate-900 mt-0.5">
                 {activeTab === 'dashboard' && 'Daily Health Overview'}
                 {activeTab === 'glucose' && 'Blood Sugar Log & Trends'}
@@ -978,14 +1022,10 @@ export default function App({ session }: { session?: Session }) {
             </div>
           </div>
 
-          {/* =========================================================
-              VIEW 1: DASHBOARD
-             ========================================================= */}
+          {/* VIEW 1: DASHBOARD */}
           {activeTab === 'dashboard' && (
             <div className="space-y-6">
-              {/* Top KPI Summary Cards */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {/* Card 1: Meds Progress */}
                 <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs">
                   <div className="flex items-center justify-between mb-3">
                     <span className="text-xs font-semibold text-slate-500 uppercase">Today's Meds</span>
@@ -1007,7 +1047,6 @@ export default function App({ session }: { session?: Session }) {
                   </div>
                 </div>
 
-                {/* Card 2: Latest Blood Sugar */}
                 <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs">
                   <div className="flex items-center justify-between mb-3">
                     <span className="text-xs font-semibold text-slate-500 uppercase">Latest Glucose</span>
@@ -1045,7 +1084,6 @@ export default function App({ session }: { session?: Session }) {
                   )}
                 </div>
 
-                {/* Card 3: Action Items */}
                 <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs">
                   <div className="flex items-center justify-between mb-3">
                     <span className="text-xs font-semibold text-slate-500 uppercase">Pending Tasks</span>
@@ -1064,7 +1102,6 @@ export default function App({ session }: { session?: Session }) {
                   </p>
                 </div>
 
-                {/* Card 4: Next Appointment */}
                 <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs">
                   <div className="flex items-center justify-between mb-3">
                     <span className="text-xs font-semibold text-slate-500 uppercase">Next Visit</span>
@@ -1087,9 +1124,7 @@ export default function App({ session }: { session?: Session }) {
                 </div>
               </div>
 
-              {/* Main Two-Column Grid */}
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                {/* Left 7 Cols: Today's Medication Checklist */}
                 <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
                   <div className="p-5 border-b border-slate-100 flex items-center justify-between">
                     <div>
@@ -1112,7 +1147,7 @@ export default function App({ session }: { session?: Session }) {
                         No daily medications configured yet.
                       </div>
                     ) : (
-                      medications.map((med: any) => {
+                      medications.map((med) => {
                         const isTaken = takenMedIdsToday.includes(med.id);
                         return (
                           <div
@@ -1162,7 +1197,6 @@ export default function App({ session }: { session?: Session }) {
                   </div>
                 </div>
 
-                {/* Right 5 Cols: Quick Blood Sugar Logger */}
                 <div className="lg:col-span-5 bg-white rounded-2xl border border-slate-200/80 shadow-xs p-5">
                   <div className="flex items-center justify-between mb-4">
                     <div>
@@ -1257,12 +1291,11 @@ export default function App({ session }: { session?: Session }) {
                     </button>
                   </form>
 
-                  {/* Today's Mini Readings List */}
                   {todaySugarLogs.length > 0 && (
                     <div className="mt-4 pt-4 border-t border-slate-100">
                       <p className="text-xs font-semibold text-slate-500 mb-2">Logged Today</p>
                       <div className="space-y-2">
-                        {todaySugarLogs.slice(0, 3).map((log: any) => {
+                        {todaySugarLogs.slice(0, 3).map((log) => {
                           const status = getGlucoseStatus(log.value, log.unit, log.type);
                           return (
                             <div
@@ -1289,9 +1322,7 @@ export default function App({ session }: { session?: Session }) {
                 </div>
               </div>
 
-              {/* Bottom Row: Action Reminders & Upcoming Doctor Visits */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Pending Meds to Buy & Lab Tests */}
                 <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-5">
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="font-bold text-slate-900">Action Required: Buy & Lab Tests</h3>
@@ -1303,7 +1334,7 @@ export default function App({ session }: { session?: Session }) {
                     </button>
                   </div>
                   <div className="space-y-2.5">
-                    {[...pendingBuyItems, ...pendingLabTests].slice(0, 4).map((item: any) => (
+                    {[...pendingBuyItems, ...pendingLabTests].slice(0, 4).map((item) => (
                       <div
                         key={item.id}
                         className="flex items-start gap-3 p-3 rounded-xl bg-slate-50 border border-slate-100"
@@ -1341,7 +1372,6 @@ export default function App({ session }: { session?: Session }) {
                   </div>
                 </div>
 
-                {/* Upcoming Doctor Visits */}
                 <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-5">
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="font-bold text-slate-900">Upcoming Doctor Appointments</h3>
@@ -1353,7 +1383,7 @@ export default function App({ session }: { session?: Session }) {
                     </button>
                   </div>
                   <div className="space-y-3">
-                    {upcomingAppointments.slice(0, 2).map((apt: any) => (
+                    {upcomingAppointments.slice(0, 2).map((apt) => (
                       <div
                         key={apt.id}
                         className="p-3.5 rounded-xl border border-indigo-100 bg-indigo-50/40"
@@ -1392,12 +1422,9 @@ export default function App({ session }: { session?: Session }) {
             </div>
           )}
 
-          {/* =========================================================
-              VIEW 2: BLOOD SUGAR LOG, BACKLOG & ANALYTICS
-             ========================================================= */}
+          {/* VIEW 2: BLOOD SUGAR LOG, BACKLOG & ANALYTICS */}
           {activeTab === 'glucose' && (
             <div className="space-y-6">
-              {/* Trend Chart Card */}
               <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
                   <div>
@@ -1441,7 +1468,6 @@ export default function App({ session }: { session?: Session }) {
                 />
               </div>
 
-              {/* Log New or Backlogged Entry Form */}
               <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs">
                 <h3 className="font-bold text-slate-900 mb-1">
                   Log Blood Sugar Reading (Supports Backlogging Past Dates)
@@ -1527,7 +1553,6 @@ export default function App({ session }: { session?: Session }) {
                 </form>
               </div>
 
-              {/* Historical Log Table with Inline Editing */}
               <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
                 <div className="p-5 border-b border-slate-100 flex items-center justify-between">
                   <h3 className="font-bold text-slate-900">
@@ -1551,7 +1576,7 @@ export default function App({ session }: { session?: Session }) {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 text-sm">
-                      {sortedSugarLogs.map((log: any) => {
+                      {sortedSugarLogs.map((log) => {
                         const isEditing = editingSugarId === log.id;
                         const status = getGlucoseStatus(log.value, log.unit, log.type);
                         const convertedVal =
@@ -1701,12 +1726,9 @@ export default function App({ session }: { session?: Session }) {
             </div>
           )}
 
-          {/* =========================================================
-              VIEW 3: DAILY MEDICATIONS MANAGER
-             ========================================================= */}
+          {/* VIEW 3: DAILY MEDICATIONS MANAGER */}
           {activeTab === 'medications' && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              {/* Left 4 Cols: Add/Edit Medication Form */}
               <div className="lg:col-span-4 bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs h-fit">
                 <h3 className="font-bold text-slate-900 mb-1">
                   {editingMedId ? 'Edit Daily Medication' : 'Add Daily Medication'}
@@ -1798,10 +1820,9 @@ export default function App({ session }: { session?: Session }) {
                 </form>
               </div>
 
-              {/* Right 8 Cols: Active Medications List */}
               <div className="lg:col-span-8 space-y-4">
                 {['Morning', 'Afternoon', 'Evening', 'Night', 'Before Meals'].map((slot) => {
-                  const slotMeds = medications.filter((m: any) => m.timing === slot);
+                  const slotMeds = medications.filter((m) => m.timing === slot);
                   if (slotMeds.length === 0) return null;
                   return (
                     <div
@@ -1815,7 +1836,7 @@ export default function App({ session }: { session?: Session }) {
                         </h4>
                       </div>
                       <div className="divide-y divide-slate-100">
-                        {slotMeds.map((med: any) => (
+                        {slotMeds.map((med) => (
                           <div
                             key={med.id}
                             className="p-4 flex items-start justify-between gap-4 hover:bg-slate-50/60"
@@ -1857,14 +1878,10 @@ export default function App({ session }: { session?: Session }) {
             </div>
           )}
 
-          {/* =========================================================
-              VIEW 4: MEDS TO BUY, LAB TESTS & DOCTOR APPOINTMENTS
-             ========================================================= */}
+          {/* VIEW 4: MEDS TO BUY, LAB TESTS & DOCTOR APPOINTMENTS */}
           {activeTab === 'tasks' && (
             <div className="space-y-6">
-              {/* Top Grid: Pharmacy Buy List & Lab Tests */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Column 1: Meds & Supplies to Buy */}
                 <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-5 flex flex-col">
                   <div className="flex items-center gap-2.5 mb-4">
                     <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center">
@@ -1909,8 +1926,8 @@ export default function App({ session }: { session?: Session }) {
 
                   <div className="space-y-2 flex-1">
                     {actionItems
-                      .filter((i: any) => i.category === 'med_to_buy')
-                      .map((item: any) => (
+                      .filter((i) => i.category === 'med_to_buy')
+                      .map((item) => (
                         <div
                           key={item.id}
                           className={`p-3 rounded-xl border flex items-start justify-between gap-3 transition ${
@@ -1957,7 +1974,6 @@ export default function App({ session }: { session?: Session }) {
                   </div>
                 </div>
 
-                {/* Column 2: Diagnostic Lab Tests & Prep Instructions */}
                 <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-5 flex flex-col">
                   <div className="flex items-center gap-2.5 mb-4">
                     <div className="w-9 h-9 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center">
@@ -2008,8 +2024,8 @@ export default function App({ session }: { session?: Session }) {
 
                   <div className="space-y-2 flex-1">
                     {actionItems
-                      .filter((i: any) => i.category === 'lab_test')
-                      .map((item: any) => (
+                      .filter((i) => i.category === 'lab_test')
+                      .map((item) => (
                         <div
                           key={item.id}
                           className={`p-3 rounded-xl border flex items-start justify-between gap-3 transition ${
@@ -2066,7 +2082,6 @@ export default function App({ session }: { session?: Session }) {
                 </div>
               </div>
 
-              {/* Bottom Section: Doctor Appointments Scheduler */}
               <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-5">
                 <div className="flex items-center gap-2.5 mb-5">
                   <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
@@ -2081,7 +2096,6 @@ export default function App({ session }: { session?: Session }) {
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                  {/* Add/Edit Appointment Form */}
                   <form
                     onSubmit={handleSaveAppointment}
                     className="lg:col-span-5 space-y-3 bg-slate-50 p-4 rounded-xl border border-slate-100 h-fit"
@@ -2155,7 +2169,6 @@ export default function App({ session }: { session?: Session }) {
                     </div>
                   </form>
 
-                  {/* Appointments List */}
                   <div className="lg:col-span-7 space-y-3">
                     {appointments.length === 0 ? (
                       <p className="text-sm text-slate-400 text-center py-8">
@@ -2164,7 +2177,7 @@ export default function App({ session }: { session?: Session }) {
                     ) : (
                       [...appointments]
                         .sort((a, b) => new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime())
-                        .map((apt: any) => (
+                        .map((apt) => (
                           <div
                             key={apt.id}
                             className="p-4 rounded-xl border border-slate-200 hover:border-indigo-200 transition flex items-start justify-between gap-4"
@@ -2216,12 +2229,9 @@ export default function App({ session }: { session?: Session }) {
             </div>
           )}
 
-          {/* =========================================================
-              VIEW 5: DAILY EMAIL NOTIFICATION SETTINGS
-             ========================================================= */}
+          {/* VIEW 5: DAILY EMAIL NOTIFICATION SETTINGS */}
           {activeTab === 'settings' && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              {/* Settings Form */}
               <div className="lg:col-span-7 bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs space-y-5">
                 <div className="flex items-center justify-between border-b border-slate-100 pb-4">
                   <div>
@@ -2361,21 +2371,18 @@ export default function App({ session }: { session?: Session }) {
                 </div>
               </div>
 
-              {/* Right 5 Cols: Backend Cron Info Card */}
               <div className="lg:col-span-5 space-y-4">
                 <div className="bg-slate-900 text-slate-100 p-6 rounded-2xl shadow-xs">
                   <div className="flex items-center gap-2 text-teal-400 text-xs font-bold uppercase tracking-wider mb-2">
                     <Sparkles className="w-4 h-4" />
-                    Live Digest Preview Ready
+                    Cloud Sync Active
                   </div>
                   <h4 className="text-lg font-bold text-white mb-2">
-                    How Your Daily Email Works
+                    Multi-Device Sync Enabled
                   </h4>
                   <p className="text-xs text-slate-300 leading-relaxed mb-4">
-                    Every morning at <strong className="text-white">{settings.reminderTime}</strong>{' '}
-                    ({settings.timezone}), your scheduled job compiles your active medications,
-                    pending pharmacy items, lab prep instructions, and doctor visits into a single
-                    clean digest sent to <strong className="text-teal-300">{settings.email}</strong>.
+                    All medications, glucose entries, shopping tasks, and appointment notes are automatically synced to your Supabase cloud database under{' '}
+                    <strong className="text-teal-300">{userEmail}</strong>. Sign in from any phone or computer to view and update the exact same records.
                   </p>
                   <button
                     onClick={() => setShowEmailModal(true)}
@@ -2411,13 +2418,10 @@ export default function App({ session }: { session?: Session }) {
         })}
       </nav>
 
-      {/* =========================================================
-          DAILY EMAIL DIGEST LIVE PREVIEW MODAL
-         ========================================================= */}
+      {/* DAILY EMAIL DIGEST LIVE PREVIEW MODAL */}
       {showEmailModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl border border-slate-200 overflow-hidden my-8">
-            {/* Modal Header */}
             <div className="bg-slate-100 px-5 py-3.5 border-b border-slate-200 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Mail className="w-4 h-4 text-teal-600" />
@@ -2433,7 +2437,6 @@ export default function App({ session }: { session?: Session }) {
               </button>
             </div>
 
-            {/* Email Metadata Header */}
             <div className="px-6 py-3 bg-slate-50 border-b border-slate-200 text-xs space-y-1">
               <p>
                 <span className="text-slate-400 font-medium">To:</span>{' '}
@@ -2448,7 +2451,6 @@ export default function App({ session }: { session?: Session }) {
               </p>
             </div>
 
-            {/* Rendered HTML Email Body */}
             <div className="p-6 max-h-[65vh] overflow-y-auto space-y-5 bg-white">
               <div className="border-l-4 border-teal-600 pl-3.5">
                 <h3 className="text-lg font-bold text-slate-900">
@@ -2465,7 +2467,7 @@ export default function App({ session }: { session?: Session }) {
                     💊 Today's Daily Medications ({medications.length})
                   </h4>
                   <div className="border border-slate-200 rounded-xl divide-y divide-slate-100">
-                    {medications.map((m: any) => (
+                    {medications.map((m) => (
                       <div key={m.id} className="p-3 text-xs">
                         <div className="font-bold text-slate-900">
                           {m.name} ({m.dosage}) — <span className="text-teal-700">{m.timing}</span>
@@ -2497,7 +2499,7 @@ export default function App({ session }: { session?: Session }) {
                     🛒 Pharmacy Shopping List ({pendingBuyItems.length})
                   </h4>
                   <ul className="list-disc pl-5 text-xs text-slate-700 space-y-1">
-                    {pendingBuyItems.map((i: any) => (
+                    {pendingBuyItems.map((i) => (
                       <li key={i.id}>
                         <strong>{i.title}</strong> {i.details ? `— ${i.details}` : ''}
                       </li>
@@ -2512,7 +2514,7 @@ export default function App({ session }: { session?: Session }) {
                     🧪 Pending Lab Tests & Prep Instructions ({pendingLabTests.length})
                   </h4>
                   <ul className="list-disc pl-5 text-xs text-slate-700 space-y-1">
-                    {pendingLabTests.map((t: any) => (
+                    {pendingLabTests.map((t) => (
                       <li key={t.id}>
                         <strong>{t.title}</strong>
                         {t.targetDate ? ` (Target: ${formatShortDate(t.targetDate)})` : ''}
@@ -2529,7 +2531,7 @@ export default function App({ session }: { session?: Session }) {
                     📅 Upcoming Doctor Appointments
                   </h4>
                   <div className="space-y-2">
-                    {upcomingAppointments.map((a: any) => (
+                    {upcomingAppointments.map((a) => (
                       <div
                         key={a.id}
                         className="p-3 rounded-xl bg-indigo-50/60 border border-indigo-100 text-xs"
@@ -2548,10 +2550,9 @@ export default function App({ session }: { session?: Session }) {
               )}
             </div>
 
-            {/* Modal Footer */}
             <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
               <span className="text-xs text-slate-500">
-                Simulated preview using your live app data
+                Simulated preview using your live cloud data
               </span>
               <div className="flex items-center gap-2">
                 <button
