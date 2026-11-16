@@ -404,6 +404,7 @@ export default function App({ session }: { session?: Session }) {
   // Navigation & Sync Status
   const [activeTab, setActiveTab] = useState('dashboard');
   const [syncStatus, setSyncStatus] = useState<'loading' | 'synced' | 'syncing' | 'error'>('loading');
+  const [sendingEmail, setSendingEmail] = useState(false);
   const isInitialLoad = useRef(true);
   const skipNextUpload = useRef(false);
 
@@ -455,7 +456,6 @@ export default function App({ session }: { session?: Session }) {
         });
         setSyncStatus('synced');
       } else {
-        // First time user: seed initial record into Supabase
         const defaultSettings = getInitialSettings(userEmail);
         setSettings(defaultSettings);
         const { error: insertError } = await supabase.from('user_health_data').upsert({
@@ -475,7 +475,6 @@ export default function App({ session }: { session?: Session }) {
 
     loadCloudData();
 
-    // Real-time listener for changes made on other devices
     const channel = supabase
       .channel(`health_sync_${userId}`)
       .on(
@@ -544,7 +543,7 @@ export default function App({ session }: { session?: Session }) {
   const [toast, setToast] = useState<{ message: string; type: string } | null>(null);
   const showToast = (message: string, type = 'success') => {
     setToast({ message, type });
-    setTimeout(() => setToast(null), 3200);
+    setTimeout(() => setToast(null), 4000);
   };
 
   // --- BLOOD SUGAR STATE & HANDLERS ---
@@ -774,8 +773,47 @@ export default function App({ session }: { session?: Session }) {
     showToast('Appointment cancelled.', 'info');
   };
 
-  // --- EMAIL PREVIEW & DEMO RESET ---
+  // --- REAL EMAIL SEND & DEMO RESET ---
   const [showEmailModal, setShowEmailModal] = useState(false);
+
+  const handleSendRealTestEmail = async () => {
+    if (!userId) {
+      showToast('Please sign in first to send emails.', 'error');
+      return;
+    }
+    setSendingEmail(true);
+    try {
+      // Ensure latest settings & records are saved before sending
+      await supabase.from('user_health_data').upsert({
+        user_id: userId,
+        medications,
+        taken_meds_by_date: takenMedsByDate,
+        sugar_logs: sugarLogs,
+        action_items: actionItems,
+        appointments,
+        settings,
+        updated_at: new Date().toISOString()
+      });
+
+      const res = await fetch('/api/send-digest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, isTest: true })
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setShowEmailModal(false);
+        showToast(`Email sent to ${settings.email}! Check your inbox.`);
+      } else {
+        showToast(data.error || 'Failed to send email. Verify Vercel env vars.', 'error');
+      }
+    } catch {
+      showToast('Network error while sending email.', 'error');
+    } finally {
+      setSendingEmail(false);
+    }
+  };
 
   const resetDemoData = () => {
     setMedications(INITIAL_MEDICATIONS);
@@ -861,7 +899,7 @@ export default function App({ session }: { session?: Session }) {
       {/* Toast Notification */}
       {toast && (
         <div className="fixed top-4 right-4 z-50 flex items-center gap-2.5 bg-slate-900 text-white px-4 py-3 rounded-xl shadow-lg border border-slate-700 animate-fade-in">
-          <CheckCircle2 className="w-4 h-4 text-teal-400 shrink-0" />
+          <CheckCircle2 className={`w-4 h-4 shrink-0 ${toast.type === 'error' ? 'text-rose-400' : 'text-teal-400'}`} />
           <span className="text-sm font-medium">{toast.message}</span>
         </div>
       )}
@@ -929,7 +967,7 @@ export default function App({ session }: { session?: Session }) {
             className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-teal-600 hover:bg-teal-700 text-white text-xs font-semibold rounded-xl transition shadow-xs"
           >
             <Mail className="w-3.5 h-3.5" />
-            Preview Daily Email
+            Preview & Send Email
           </button>
 
           {session && (
@@ -2365,7 +2403,7 @@ export default function App({ session }: { session?: Session }) {
                       className="flex items-center gap-2 px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold rounded-xl transition shadow-xs"
                     >
                       <Send className="w-4 h-4" />
-                      Preview & Test Daily Email
+                      Preview & Send Daily Email
                     </button>
                   </div>
                 </div>
@@ -2375,21 +2413,22 @@ export default function App({ session }: { session?: Session }) {
                 <div className="bg-slate-900 text-slate-100 p-6 rounded-2xl shadow-xs">
                   <div className="flex items-center gap-2 text-teal-400 text-xs font-bold uppercase tracking-wider mb-2">
                     <Sparkles className="w-4 h-4" />
-                    Cloud Sync Active
+                    Cloud Sync & Resend Ready
                   </div>
                   <h4 className="text-lg font-bold text-white mb-2">
-                    Multi-Device Sync Enabled
+                    Multi-Device Sync & Real Emails
                   </h4>
                   <p className="text-xs text-slate-300 leading-relaxed mb-4">
-                    All medications, glucose entries, shopping tasks, and appointment notes are automatically synced to your Supabase cloud database under{' '}
-                    <strong className="text-teal-300">{userEmail}</strong>. Sign in from any phone or computer to view and update the exact same records.
+                    All records sync automatically to Supabase under{' '}
+                    <strong className="text-teal-300">{userEmail}</strong>. Click below to preview your live digest and send a real test email to{' '}
+                    <strong className="text-white">{settings.email}</strong>.
                   </p>
                   <button
                     onClick={() => setShowEmailModal(true)}
                     className="w-full py-2.5 px-4 bg-teal-500 hover:bg-teal-400 text-slate-950 font-bold text-xs rounded-xl transition flex items-center justify-center gap-2"
                   >
                     <Mail className="w-4 h-4" />
-                    Open Live HTML Email Preview
+                    Open Preview & Send Test Email
                   </button>
                 </div>
               </div>
@@ -2418,7 +2457,7 @@ export default function App({ session }: { session?: Session }) {
         })}
       </nav>
 
-      {/* DAILY EMAIL DIGEST LIVE PREVIEW MODAL */}
+      {/* DAILY EMAIL DIGEST LIVE PREVIEW & REAL SEND MODAL */}
       {showEmailModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl border border-slate-200 overflow-hidden my-8">
@@ -2426,7 +2465,7 @@ export default function App({ session }: { session?: Session }) {
               <div className="flex items-center gap-2">
                 <Mail className="w-4 h-4 text-teal-600" />
                 <span className="text-xs font-bold text-slate-700">
-                  Daily Email Digest Preview ({settings.reminderTime} {settings.timezone})
+                  Daily Email Digest ({settings.reminderTime} {settings.timezone})
                 </span>
               </div>
               <button
@@ -2552,24 +2591,23 @@ export default function App({ session }: { session?: Session }) {
 
             <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
               <span className="text-xs text-slate-500">
-                Simulated preview using your live cloud data
+                Sends real email via Resend API
               </span>
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setShowEmailModal(false)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-200 rounded-xl"
+                  disabled={sendingEmail}
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-200 rounded-xl disabled:opacity-50"
                 >
                   Close
                 </button>
                 <button
-                  onClick={() => {
-                    setShowEmailModal(false);
-                    showToast(`Test daily digest simulated to ${settings.email}!`);
-                  }}
-                  className="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white text-xs font-semibold rounded-xl flex items-center gap-1.5"
+                  onClick={handleSendRealTestEmail}
+                  disabled={sendingEmail}
+                  className="px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-60 text-white text-xs font-semibold rounded-xl flex items-center gap-1.5"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  Simulate Test Send
+                  {sendingEmail ? 'Sending...' : 'Send Real Test Email'}
                 </button>
               </div>
             </div>
